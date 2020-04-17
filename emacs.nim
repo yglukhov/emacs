@@ -82,6 +82,8 @@ proc emToNim[T](e: Env, v: Value, r: var T) =
     e.extractTuple(v, r)
   elif T is Value:
     r = v
+  elif T is bool:
+    r = e.isNotNil(v)
   else:
     {.error: "Unsupported type to convert from Emacs Value: " & $T.}
 
@@ -101,12 +103,33 @@ proc verifyArgs(nargs: int, args: UncheckedArray[Value], argsExpected: int, func
 proc parseArg[T](e: Env, nargs: int, args: UncheckedArray[Value], idx: int, argName: string, v: var T) =
   emToNim(e, args[idx], v)
 
+proc parseVarargs[T](e: Env, nargs: int, args: UncheckedArray[Value], idx: int, argName: string, v: var T) =
+  let count = nargs - idx
+  v.setLen(count)
+  for i in 0 ..< count:
+    emToNim(e, args[idx + i], v[i])
+
+when compileOption("threads"):
+  var gcInited {.threadVar.}: bool
+
+proc updateStackBottom() {.inline.} =
+  when not defined(gcDestructors):
+    var a {.volatile.}: int
+    nimGC_setStackBottom(cast[pointer](cast[uint](addr a)))
+    when compileOption("threads") and not compileOption("tlsEmulation"):
+      if not gcInited:
+        gcInited = true
+        setupForeignThreadGC()
+
 template seqTypeForOpenarrayType[T](t: type openarray[T]): typedesc = seq[T]
 template valueTypeForArgType(t: typedesc): typedesc =
   when t is openarray:
     seqTypeForOpenarrayType(t)
   else:
     t
+
+proc typIsVarargs(t: NimNode): bool =
+  t.kind == nnkBracketExpr and t.len == 2 and t[0].kind == nnkSym and $t[0] == "varargs"
 
 proc makeCallNimProcWithLispArgs(prc, formalParams, env, nargs, args: NimNode): tuple[parseArgs, call: NimNode] =
   let
@@ -128,8 +151,12 @@ proc makeCallNimProcWithLispArgs(prc, formalParams, env, nargs, args: NimNode): 
       error("Typeless arguments are not supported: " & $a.name, a.name)
     # XXX: The newCall("type", a.typ) should be just `a.typ` but compilation fails. Nim bug?
     argsVarSection.add(newIdentDefs(argIdent, newCall(bindSym"valueTypeForArgType", newCall("type", a.typ))))
-    parseArgsStmts.add(newCall(bindSym"parseArg", env, nargs, args,
-                   newLit(a.idx), newLit(argName), argIdent))
+    if typIsVarargs(a.typ):
+      parseArgsStmts.add(newCall(bindSym"parseVarargs", env, nargs, args,
+                     newLit(a.idx), newLit(argName), argIdent))
+    else:
+      parseArgsStmts.add(newCall(bindSym"parseArg", env, nargs, args,
+                     newLit(a.idx), newLit(argName), argIdent))
     origCall.add(argIdent)
     inc numArgs
 
@@ -160,7 +187,8 @@ proc getFormalParams(prc: NimNode): NimNode =
       result = ty[0]
   result.expectKind(nnkFormalParams)
 
-template lispException(e: ref Exception): Value =
+proc lispException(e: Env, ex: ref Exception): Value =
+  echo "Exception caught: ", ex.msg, ": ", ex.getStackTrace()
   Value(nil)
 
 proc toEmValue[T](e: Env, v: T): Value {.inline.}
@@ -178,23 +206,32 @@ macro callNimProcWithLispArgs(prc: typed, e: Env, nargs: int, args: UncheckedArr
     `parseArgs`
     try:
       toEmValueAux(`call`)
-    except Exception as e:
-      lispException(e)
+    except Exception as ex:
+      lispException(`e`, ex)
 
 macro numArgs(prc: typed): untyped =
-  var i = 0
+  var minArity, maxArity: int
   for a in prc.getFormalParams.arguments:
-    inc i
-  result = newLit(i)
+    if typIsVarargs(a.typ):
+      maxArity = 99999
+    else:
+      inc minArity
+  if maxArity == 0:
+    maxArity = minArity
+  result = newLit((minArity, maxArity))
 
 proc nimcallWrapper[T](e: Env, nargs: int, args: UncheckedArray[Value], data: pointer): Value {.cdecl.} =
   theEnv = e
-  let p = cast[T](data)
-  toEmValueAux(callNimProcWithLispArgs(p, e, nargs, args))
+  updateStackBottom()
+  proc noinline(e: Env, nargs: int, args: UncheckedArray[Value], data: pointer): Value {.nimcall.} =
+    let p = cast[T](data)
+    toEmValueAux(callNimProcWithLispArgs(p, e, nargs, args))
+  var p {.volatile.}: proc(e: Env, nargs: int, args: UncheckedArray[Value], data: pointer): Value {.nimcall.} = noinline
+  p(e, nargs, args, data)
 
 proc nimcallProcToLisp[T](e: Env, p: T): Value =
-  let arity = numArgs(p)
-  e.makeFunction(arity, arity, nimcallWrapper[T], "Nim function", cast[pointer](p))
+  let (minArity, maxArity) = numArgs(p)
+  e.makeFunction(minArity, maxArity, nimcallWrapper[T], "Nim function", cast[pointer](p))
 
 proc toEmArg*[T](v: T): Value =
   # Don't use this please!
@@ -215,6 +252,11 @@ proc toEmValue[T](e: Env, v: T): Value =
     {.error: "Closures are not supported".}
   elif T is void:
     Value(nil)
+  elif T is bool:
+    if v:
+      e.intern("t")
+    else:
+      e.intern("NIL")
   else:
     {.error: "Unsupported type to make EmValue " & $T.}
 

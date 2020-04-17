@@ -38,7 +38,7 @@ type
 
     pTypeOf*: proc(e: Env25, value: Value): Value {.cdecl.}
 
-    isNotNil*: proc(e: Env25, value: Value): bool {.cdecl.}
+    pIsNotNil*: proc(e: Env25, value: Value): bool {.cdecl.}
 
     pEq*: proc(e: Env25, a, b: Value): bool {.cdecl.}
 
@@ -73,6 +73,7 @@ proc funcall*(e: Env, function: Value, args: openarray[Value]): Value =
 proc intern*(e: Env, symName: cstring): Value = e.pIntern(e, symName)
 
 proc getType*(e: Env, value: Value): Value = e.pTypeOf(e, value)
+proc isNotNil*(e: Env, value: Value): bool = e.pIsNotNil(e, value)
 proc eq*(e: Env, a, b: Value): bool = e.pEq(e, a, b)
 
 proc extractInt*(e: Env, a: Value): int64 = e.pExtractInt(e, a)

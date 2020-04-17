@@ -1,4 +1,3 @@
-# import emacs/module
 import emacs
 import emacs/[utils, sugar]
 
@@ -27,5 +26,9 @@ proc main() =
   globalSetKey("C-c n n", ~`test-func-defined-in-nim`) do():
     echo "Nim func called!" # This will go to stdout
     discard ~message("This string will be displayed in status bar!")
+
+  # echo "Hello world!"
+  # discard ~`save-buffers-kill-terminal`()
+  # discard ~message("Hi emacs 123")
 
 main()
