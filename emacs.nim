@@ -229,34 +229,34 @@ proc nimcallWrapper[T](e: Env, nargs: int, args: UncheckedArray[Value], data: po
   var p {.volatile.}: proc(e: Env, nargs: int, args: UncheckedArray[Value], data: pointer): Value {.nimcall.} = noinline
   p(e, nargs, args, data)
 
-proc nimcallProcToLisp[T](e: Env, p: T): Value =
+proc nimcallProcToLisp[T](e: Env, doc: cstring, p: T): Value =
   let (minArity, maxArity) = numArgs(p)
-  e.makeFunction(minArity, maxArity, nimcallWrapper[T], "Nim function", cast[pointer](p))
+  e.makeFunction(minArity, maxArity, nimcallWrapper[T], doc, cast[pointer](p))
+
+proc nimcallProcToLisp[T](e: Env, p: T): Value {.inline.} =
+  nimcallProcToLisp(e, "Nim function", p)
 
 proc toEmArg*[T](v: T): Value =
   # Don't use this please!
-  result = theEnv.toEmValue(v)
+  result = toEmValue(theEnv, v)
 
 proc toEmValue[T](e: Env, v: T): Value =
   when T is SomeInteger:
-    e.makeInt(int64(v))
+    makeInt(e, int64(v))
   elif T is SomeFloat:
-    e.makeFloat(cdouble(v))
+    makeFloat(e, cdouble(v))
   elif T is string|cstring:
-    e.makeString(v, v.len)
+    makeString(e, v, v.len)
   elif T is Value:
     v
   elif T is proc {.nimcall.}:
-    e.nimcallProcToLisp(v)
+    nimcallProcToLisp(e, v)
   elif T is proc {.closure.}:
     {.error: "Closures are not supported".}
   elif T is void:
     Value(nil)
   elif T is bool:
-    if v:
-      e.intern("t")
-    else:
-      e.intern("NIL")
+    intern(e, if v: "t" else: "NIL")
   else:
     {.error: "Unsupported type to make EmValue " & $T.}
 
@@ -278,6 +278,18 @@ proc stringifyNode(n: NimNode): string =
     for c in n: result &= $c
   else:
     result = $n
+
+macro makeFunction*(e: Env, f: untyped): untyped =
+  var doc = "Nim func"
+  if f.kind in RoutineNodes:
+    var n = f.body
+    if n.kind in {nnkStmtList, nnkStmtListExpr} and n.len > 0:
+      n = n[0]
+    if n.kind == nnkCommentStmt:
+      doc = n.strVal
+
+  result = quote do:
+    nimcallProcToLisp(`e`, `doc`, `f`)
 
 macro makeSweetLispCall*(u: untyped, doStmt: untyped): untyped =
   # Private. Don't use.
